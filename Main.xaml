@@ -542,18 +542,32 @@
           <TextBlock Text="開網頁給對方下載" FontWeight="SemiBold" Margin="0,0,0,6"/>
           <TextBlock x:Name="WebUrl" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource Blue}" TextWrapping="Wrap"/>
           <TextBlock x:Name="WebHint" Text="在另一台的瀏覽器輸入這個網址,對方不用裝工具,也不用改設定。" Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="0,4,0,10"/>
-          <Border x:Name="WebDrop" AllowDrop="True" Background="{DynamicResource Field}" CornerRadius="7" Padding="10,8" Height="96">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-              <TextBlock x:Name="WebList" FontSize="13" TextWrapping="Wrap"/>
-            </ScrollViewer>
-          </Border>
-          <UniformGrid Columns="3" Margin="0,8,0,0">
-            <Button x:Name="WebAddFilesBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="加入檔案…" Margin="0,0,4,0"/>
-            <Button x:Name="WebAddFolderBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="加入資料夾…" Margin="2,0,2,0"/>
-            <Button x:Name="WebClearBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="清空清單" Margin="4,0,0,0"/>
+          <StackPanel x:Name="WebFiles">
+            <Border x:Name="WebDrop" AllowDrop="True" Background="{DynamicResource Field}" CornerRadius="7" Padding="10,8" Height="96">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="WebList" FontSize="13" TextWrapping="Wrap"/>
+              </ScrollViewer>
+            </Border>
+            <UniformGrid Columns="3" Margin="0,8,0,0">
+              <Button x:Name="WebAddFilesBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="加入檔案…" Margin="0,0,4,0"/>
+              <Button x:Name="WebAddFolderBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="加入資料夾…" Margin="2,0,2,0"/>
+              <Button x:Name="WebClearBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="清空清單" Margin="4,0,0,0"/>
+            </UniformGrid>
+          </StackPanel>
+          <UniformGrid x:Name="WebQr" Visibility="Collapsed" Columns="2">
+            <StackPanel>
+              <TextBlock Text="1. 掃描連上熱點" Style="{StaticResource Hint}" HorizontalAlignment="Center" Margin="0,0,0,4"/>
+              <Image x:Name="WifiQrImage" Width="160" Height="160" RenderOptions.BitmapScalingMode="NearestNeighbor" AutomationProperties.Name="1. 掃描連上熱點"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="2. 掃描開啟網頁" Style="{StaticResource Hint}" HorizontalAlignment="Center" Margin="0,0,0,4"/>
+              <Image x:Name="UrlQrImage" Width="160" Height="160" RenderOptions.BitmapScalingMode="NearestNeighbor" AutomationProperties.Name="2. 掃描開啟網頁"/>
+            </StackPanel>
           </UniformGrid>
-          <UniformGrid Columns="2" Margin="0,8,0,0">
+          <!-- No Columns: the row divides evenly among the buttons showing, and the QR button shows only for a hotspot. -->
+          <UniformGrid Rows="1" Margin="0,8,0,0">
             <Button x:Name="WebStopBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Foreground="{DynamicResource Red}" Content="停止分享" Margin="0,0,4,0"/>
+            <Button x:Name="WebQrBtn" Visibility="Collapsed" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="手機 QR Code" Margin="2,0,2,0"/>
             <Button x:Name="WebDoneBtn" Style="{StaticResource Soft}" Background="{DynamicResource Blue}" Foreground="White" FontWeight="SemiBold" Content="完成" Margin="4,0,0,0"/>
           </UniformGrid>
         </StackPanel>

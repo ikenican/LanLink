@@ -120,6 +120,10 @@ static class Lang
         { "(已連線)", " (online)" },
         { "(已連線 · {0})", " (online · {0})" },
         { "對方電腦", "Other PC" },
+        { "手機 QR Code", "Phone QR Code" },
+        { "檔案清單", "File List" },
+        { "1. 掃描連上熱點", "1. Scan to join the hotspot" },
+        { "2. 掃描開啟網頁", "2. Scan to open the page" },
         { "密碼…", "Password…" },
         { "熱點密碼", "Hotspot password" },
         { "儲存", "Save" },
@@ -530,6 +534,13 @@ static class Net
         return clients.Count == 1 ? clients[0] : null;
     }
 
+    // The text phone cameras read as "join this Wi-Fi". These characters are special in the format.
+    public static string WifiQrText(string ssid, string password)
+    {
+        Func<string, string> escape = s => string.Concat(s.Select(c => "\\;,\":".IndexOf(c) >= 0 ? "\\" + c : c.ToString()));
+        return "WIFI:T:WPA;S:" + escape(ssid) + ";P:" + escape(password) + ";;";
+    }
+
     public static Dictionary<string, string> ParseHotspot(string output)
     {
         var r = new Dictionary<string, string>();
@@ -741,6 +752,9 @@ static class Net
         catch (Exception ex) { failures.Add("transfer test threw: " + ex.Message); }
         try { WebShare.SelfTest(check); }
         catch (Exception ex) { failures.Add("web test threw: " + ex.Message); }
+
+        Qr.SelfTest(check);
+        check(WifiQrText("My;Net", "a\"b:c\\d") == "WIFI:T:WPA;S:My\\;Net;P:a\\\"b\\:c\\\\d;;", "wifi qr text");
 
         var webAuto = WebSteps("E", true);
         check(webAuto.Any(x => x.Contains("source=dhcp")) && webAuto.Any(x => x.Contains("remoteip=169.254.0.0/16") && x.Contains("interfacetype=lan") && x.Contains("localport=45451")), "web setup");
@@ -1207,6 +1221,243 @@ class Adapter
     public bool Hotspot { get { return Wireless && Ip == Net.HotspotIp; } }
     public bool HotspotClient { get { return Wireless && !Hotspot && Ip != null && Ip.StartsWith("192.168.137."); } }
     public override string ToString() { return (Thunderbolt ? "Thunderbolt" : Hotspot ? Lang.L("Wi-Fi 熱點") : Name) + Net.LinkText(Up, Speed, Wireless); }
+}
+
+// QR Code, byte mode, low error correction. Stops at version 6 (134 bytes), which fits an address and any normal Wi-Fi login;
+// version 7 and up also need version bits. Encode returns null for longer text.
+static class Qr
+{
+    static readonly int[] DataWords = { 19, 34, 55, 80, 108, 136 };
+    static readonly int[] EcWords = { 7, 10, 15, 20, 26, 18 };
+    static readonly int[] Blocks = { 1, 1, 1, 1, 1, 2 };
+    static readonly int[] Alignment = { 0, 18, 22, 26, 30, 34 };
+
+    static int Multiply(int a, int b)
+    {
+        int r = 0;
+        for (int i = 7; i >= 0; i--)
+        {
+            r = (r << 1) ^ ((r >> 7) * 0x11D);
+            r ^= ((b >> i) & 1) * a;
+        }
+        return r;
+    }
+
+    public static byte[] ReedSolomon(byte[] data, int count)
+    {
+        var divisor = new int[count];
+        divisor[count - 1] = 1;
+        int root = 1;
+        for (int i = 0; i < count; i++)
+        {
+            for (int j = 0; j < count; j++)
+            {
+                divisor[j] = Multiply(divisor[j], root);
+                if (j + 1 < count) divisor[j] ^= divisor[j + 1];
+            }
+            root = Multiply(root, 2);
+        }
+        var result = new byte[count];
+        foreach (byte b in data)
+        {
+            int factor = b ^ result[0];
+            Array.Copy(result, 1, result, 0, count - 1);
+            result[count - 1] = 0;
+            for (int i = 0; i < count; i++) result[i] ^= (byte)Multiply(divisor[i], factor);
+        }
+        return result;
+    }
+
+    public static int FormatBits(int mask)
+    {
+        int data = 1 << 3 | mask; // 01 is low error correction.
+        int rem = data;
+        for (int i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+        return (data << 10 | rem) ^ 0x5412;
+    }
+
+    static byte[] Codewords(byte[] text, int version)
+    {
+        var bits = new List<bool>();
+        Action<int, int> add = (value, count) => { for (int i = count - 1; i >= 0; i--) bits.Add(((value >> i) & 1) != 0); };
+        add(4, 4);
+        add(text.Length, 8);
+        foreach (byte b in text) add(b, 8);
+        int capacity = DataWords[version] * 8;
+        add(0, Math.Min(4, capacity - bits.Count));
+        add(0, (8 - bits.Count % 8) % 8);
+        var data = new byte[DataWords[version]];
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (i * 8 < bits.Count) for (int k = 0; k < 8; k++) data[i] = (byte)(data[i] << 1 | (bits[i * 8 + k] ? 1 : 0));
+            else data[i] = (byte)((i - bits.Count / 8) % 2 == 0 ? 0xEC : 0x11);
+        }
+
+        // Equal block sizes in these versions, so interleaving is just taking turns.
+        int blocks = Blocks[version], size = data.Length / blocks, ec = EcWords[version];
+        var codes = Enumerable.Range(0, blocks).Select(b => ReedSolomon(data.Skip(b * size).Take(size).ToArray(), ec)).ToList();
+        var result = new List<byte>();
+        for (int i = 0; i < size; i++) for (int b = 0; b < blocks; b++) result.Add(data[b * size + i]);
+        for (int i = 0; i < ec; i++) for (int b = 0; b < blocks; b++) result.Add(codes[b][i]);
+        return result.ToArray();
+    }
+
+    static void DrawFormat(bool[,] m, bool[,] fixedCell, int mask)
+    {
+        int bits = FormatBits(mask), n = m.GetLength(0);
+        Action<int, int, int> put = (x, y, bit) =>
+        {
+            m[y, x] = ((bits >> bit) & 1) != 0;
+            fixedCell[y, x] = true;
+        };
+        for (int i = 0; i <= 5; i++) put(8, i, i);
+        put(8, 7, 6);
+        put(8, 8, 7);
+        put(7, 8, 8);
+        for (int i = 9; i < 15; i++) put(14 - i, 8, i);
+        for (int i = 0; i < 8; i++) put(n - 1 - i, 8, i);
+        for (int i = 8; i < 15; i++) put(8, n - 15 + i, i);
+    }
+
+    static bool MaskHit(int mask, int x, int y)
+    {
+        switch (mask)
+        {
+            case 0: return (x + y) % 2 == 0;
+            case 1: return y % 2 == 0;
+            case 2: return x % 3 == 0;
+            case 3: return (x + y) % 3 == 0;
+            case 4: return (x / 3 + y / 2) % 2 == 0;
+            case 5: return x * y % 2 + x * y % 3 == 0;
+            case 6: return (x * y % 2 + x * y % 3) % 2 == 0;
+            default: return ((x + y) % 2 + x * y % 3) % 2 == 0;
+        }
+    }
+
+    // ponytail: scores long runs and dark balance only, not the standard's 2x2 and finder-lookalike rules. Any mask is valid, this only helps scanning.
+    static int Penalty(bool[,] m)
+    {
+        int n = m.GetLength(0), score = 0, dark = 0;
+        for (int a = 0; a < n; a++)
+        {
+            int rowRun = 1, colRun = 1;
+            for (int b = 0; b < n; b++)
+            {
+                if (m[a, b]) dark++;
+                if (b == 0) continue;
+                rowRun = m[a, b] == m[a, b - 1] ? rowRun + 1 : 1;
+                colRun = m[b, a] == m[b - 1, a] ? colRun + 1 : 1;
+                if (rowRun == 5 || colRun == 5) score += 3;
+                else
+                {
+                    if (rowRun > 5) score++;
+                    if (colRun > 5) score++;
+                }
+            }
+        }
+        return score + Math.Abs(dark * 20 - n * n * 10) / (n * n) * 10;
+    }
+
+    public static bool[,] Encode(string text)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        int version = Enumerable.Range(0, DataWords.Length).Where(i => bytes.Length + 2 <= DataWords[i]).DefaultIfEmpty(-1).First();
+        if (version < 0) return null;
+
+        int n = 21 + 4 * version;
+        var m = new bool[n, n];
+        var fixedCell = new bool[n, n];
+        Action<int, int, bool> set = (x, y, dark) =>
+        {
+            m[y, x] = dark;
+            fixedCell[y, x] = true;
+        };
+        foreach (var corner in new[] { new[] { 0, 0 }, new[] { n - 7, 0 }, new[] { 0, n - 7 } })
+            for (int dy = -1; dy <= 7; dy++)
+                for (int dx = -1; dx <= 7; dx++)
+                {
+                    int x = corner[0] + dx, y = corner[1] + dy;
+                    if (x < 0 || y < 0 || x >= n || y >= n) continue;
+                    int ring = Math.Max(Math.Abs(dx - 3), Math.Abs(dy - 3));
+                    set(x, y, ring != 2 && ring != 4);
+                }
+        for (int i = 8; i < n - 8; i++)
+        {
+            set(i, 6, i % 2 == 0);
+            set(6, i, i % 2 == 0);
+        }
+        if (version > 0)
+            for (int dy = -2; dy <= 2; dy++)
+                for (int dx = -2; dx <= 2; dx++)
+                    set(Alignment[version] + dx, Alignment[version] + dy, Math.Max(Math.Abs(dx), Math.Abs(dy)) != 1);
+        DrawFormat(m, fixedCell, 0); // Reserves the cells; each mask below draws its own.
+        set(8, n - 8, true);
+
+        // Two columns at a time from the right, snaking up and down, stepping over the vertical timing line.
+        byte[] words = Codewords(bytes, version);
+        int bit = 0;
+        for (int right = n - 1; right >= 1; right -= 2)
+        {
+            if (right == 6) right = 5;
+            bool upward = ((right + 1) & 2) == 0;
+            for (int step = 0; step < n; step++)
+                for (int j = 0; j < 2; j++)
+                {
+                    int x = right - j, y = upward ? n - 1 - step : step;
+                    if (fixedCell[y, x] || bit >= words.Length * 8) continue;
+                    m[y, x] = ((words[bit >> 3] >> (7 - (bit & 7))) & 1) != 0;
+                    bit++;
+                }
+        }
+
+        bool[,] best = null;
+        int bestScore = int.MaxValue;
+        for (int mask = 0; mask < 8; mask++)
+        {
+            var candidate = (bool[,])m.Clone();
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++)
+                    if (!fixedCell[y, x] && MaskHit(mask, x, y)) candidate[y, x] = !candidate[y, x];
+            DrawFormat(candidate, fixedCell, mask);
+            int score = Penalty(candidate);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    public static void SelfTest(Action<bool, string> check)
+    {
+        // The worked example in the QR standard: version 1-M, "01234567".
+        var data = new byte[] { 0x10, 0x20, 0x0C, 0x56, 0x61, 0x80, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11 };
+        check(ReedSolomon(data, 10).SequenceEqual(new byte[] { 0xA5, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55 }), "qr error correction");
+        check(FormatBits(0) == 0x77C4 && FormatBits(7) == 0x6976, "qr format bits");
+        check(Multiply(0x80, 2) == 0x1D, "qr field multiply");
+
+        var small = Encode("hi");
+        check(small.GetLength(0) == 21, "qr smallest version");
+        check(Encode(new string('x', 17)).GetLength(0) == 21 && Encode(new string('x', 18)).GetLength(0) == 25, "qr version chosen by length");
+        check(Encode(new string('x', 134)).GetLength(0) == 41 && Encode(new string('x', 135)) == null, "qr longest text");
+        check(Encode("中").GetLength(0) == 21, "qr utf-8 text");
+        foreach (var length in new[] { 2, 18, 40, 70, 100, 134 })
+        {
+            var m = Encode(new string('x', length));
+            int n = m.GetLength(0);
+            bool ok = true;
+            foreach (var c in new[] { new[] { 0, 0 }, new[] { n - 7, 0 }, new[] { 0, n - 7 } })
+                for (int i = 0; i < 7; i++)
+                    ok &= m[c[1], c[0] + i] && m[c[1] + 6, c[0] + i] && m[c[1] + i, c[0]] && m[c[1] + i, c[0] + 6];
+            ok &= m[3, 3] && !m[1, 1] && !m[7, 7];
+            for (int i = 8; i < n - 8; i++) ok &= m[6, i] == (i % 2 == 0) && m[i, 6] == (i % 2 == 0);
+            ok &= m[n - 8, 8];
+            // Both copies of the format bits must agree, or a scanner can't start.
+            for (int i = 0; i <= 5; i++) ok &= m[i, 8] == m[8, n - 1 - i];
+            check(ok, "qr fixed patterns at length " + length);
+        }
+    }
 }
 
 // A ZIP with no compression, written while sending: nothing is held in memory or on disk, and the size is known up front.
@@ -2064,6 +2315,7 @@ class Ui
 
         F<Button>("WebBtn").Click += (s, e) => OpenWeb();
         F<Button>("WebDoneBtn").Click += (s, e) => CloseWebOverlay();
+        F<Button>("WebQrBtn").Click += (s, e) => ShowWebQr(F<UniformGrid>("WebQr").Visibility != Visibility.Visible);
         F<Button>("WebStopBtn").Click += (s, e) =>
         {
             StopWeb();
@@ -2501,12 +2753,38 @@ class Ui
         F<TextBlock>("WebHint").Text = !webOnHotspot ? Lang.L("在另一台的瀏覽器輸入這個網址,對方不用裝工具,也不用改設定。")
             : hotspotSsid != null ? string.Format(Lang.L("另一台先連上熱點 {0}(密碼 {1}),再用瀏覽器輸入這個網址。"), hotspotSsid, hotspotPass)
             : Lang.L("另一台先連上這台的熱點,再用瀏覽器輸入這個網址。");
+        if (!webOnHotspot) return;
+        F<Image>("WifiQrImage").Source = hotspotSsid == null ? null : QrImage(Net.WifiQrText(hotspotSsid, hotspotPass));
+        F<Image>("UrlQrImage").Source = a == null ? null : QrImage("http://" + a.Ip + ":" + Net.WebPort);
+    }
+
+    // One pixel per module plus the white margin scanners need; the Image scales it up without blurring.
+    static System.Windows.Media.Imaging.BitmapSource QrImage(string text)
+    {
+        const int Margin = 4;
+        var code = Qr.Encode(text);
+        if (code == null) return null;
+        int n = code.GetLength(0), size = n + 2 * Margin;
+        var pixels = Enumerable.Repeat((byte)255, size * size).ToArray();
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++)
+                if (code[y, x]) pixels[(y + Margin) * size + x + Margin] = 0;
+        return System.Windows.Media.Imaging.BitmapSource.Create(size, size, 96, 96, PixelFormats.Gray8, null, pixels, size);
+    }
+
+    void ShowWebQr(bool show)
+    {
+        F<UniformGrid>("WebQr").Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        F<StackPanel>("WebFiles").Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+        F<Button>("WebQrBtn").Content = Lang.L(show ? "檔案清單" : "手機 QR Code");
     }
 
     void ShowWebOverlay()
     {
         UpdateWebUrl();
         ShowWebList();
+        ShowWebQr(false);
+        F<Button>("WebQrBtn").Visibility = webOnHotspot ? Visibility.Visible : Visibility.Collapsed;
         // Disabled underneath so Enter can't reach One-Click Setup, the default button.
         F<ScrollViewer>("Scroll").IsEnabled = false;
         F<Border>("WebOverlay").Visibility = Visibility.Visible;
