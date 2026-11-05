@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">LAN Tool</title>
+  <desc id="desc">Minimal flat app icon showing two computers exchanging data over a local network.</desc>
+  <rect width="1024" height="1024" rx="224" fill="#F2F6FC"/>
+  <!-- Calm, flat accent geometry -->
+  <path d="M224 0H800Q1024 0 1024 224V324C845 284 703 299 557 354C394 415 251 428 0 373V224Q0 0 224 0Z" fill="#E4EEFD"/>
+  <path d="M0 780C185 744 324 785 480 846C639 908 824 902 1024 808V800Q1024 1024 800 1024H224Q0 1024 0 800Z" fill="#E8F1FF"/>
+  <!-- Connected LAN cable, rounded corners, no glow -->
+  <path d="M283 626V706Q283 746 323 746H701Q741 746 741 706V626" fill="none" stroke="#4C9CFA" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="472" y="709" width="80" height="74" rx="21" fill="#1677F2"/>
+  <rect x="490" y="728" width="44" height="36" rx="10" fill="#81BEFF"/>
+  <!-- Left computer -->
+  <rect x="121" y="347" width="331" height="256" rx="40" fill="#FFFFFF" stroke="#D3DCE9" stroke-width="12"/>
+  <rect x="145" y="371" width="283" height="204" rx="22" fill="#197AF5"/>
+  <path d="M145 505C224 464 300 483 364 431C389 411 411 406 428 405V553Q428 575 406 575H167Q145 575 145 553Z" fill="#55ABFF"/>
+  <path d="M257 609H317L327 651H247Z" fill="#A8BDD8"/>
+  <rect x="216" y="646" width="142" height="17" rx="8.5" fill="#A8BDD8"/>
+  <!-- Right computer -->
+  <rect x="572" y="347" width="331" height="256" rx="40" fill="#FFFFFF" stroke="#D3DCE9" stroke-width="12"/>
+  <rect x="596" y="371" width="283" height="204" rx="22" fill="#197AF5"/>
+  <path d="M596 505C675 464 751 483 815 431C840 411 862 406 879 405V553Q879 575 857 575H618Q596 575 596 553Z" fill="#55ABFF"/>
+  <path d="M708 609H768L778 651H698Z" fill="#A8BDD8"/>
+  <rect x="667" y="646" width="142" height="17" rx="8.5" fill="#A8BDD8"/>
+  <!-- Two-way transfer, clean filled shapes -->
+  <path d="M467 440H518V420L553 453L518 486V466H467Q455 466 455 453Q455 440 467 440Z" fill="#137CF8"/>
+  <path d="M557 505H506V485L471 518L506 551V531H557Q569 531 569 518Q569 505 557 505Z" fill="#137CF8"/>
+</svg>
