@@ -127,3 +127,7 @@ build.bat
 | `make-icon.ps1` | 由 SVG 產生 `app.ico`,只有圖示改動時才需要執行 |
 
 未經程式碼簽署的執行檔,可能被 SmartScreen 或防毒軟體警告或封鎖。
+
+## 授權
+
+[MIT](LICENSE)
