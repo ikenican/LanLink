@@ -120,6 +120,14 @@ static class Lang
         { "(已連線)", " (online)" },
         { "(已連線 · {0})", " (online · {0})" },
         { "對方電腦", "Other PC" },
+        { "網路介面卡…", "Adapters…" },
+        { "開啟 Windows 的網路連線設定", "Opens the Windows Network Connections window" },
+        { "改成自動取得 IP", "Use Automatic IP" },
+        { "不看備份,直接把這張網卡改回自動取得 IP 和 DNS", "Sets this adapter back to automatic IP and DNS, with or without a backup" },
+        { "設定中…如果跳出權限視窗,請按「是」。", "Setting up… If a permission window appears, choose “Yes”." },
+        { "已改成自動取得 IP。", "This adapter now uses an automatic IP." },
+        { "無法改成自動取得 IP,請再試一次。", "Couldn't switch to an automatic IP. Please try again." },
+        { "Wi-Fi 和熱點不用改,這個按鈕只用於網路線和 Thunderbolt。", "Wi-Fi and hotspots don't need this. It only applies to a cable or Thunderbolt." },
         { "手機 QR Code", "Phone QR Code" },
         { "檔案清單", "File List" },
         { "1. 掃描連上熱點", "1. Scan to join the hotspot" },
@@ -2355,6 +2363,12 @@ class Ui
         };
         F<Button>("AdvancedBtn").Click += (s, e) => OpenAdvanced();
         F<Button>("AdvancedDoneBtn").Click += (s, e) => CloseAdvanced();
+        F<Button>("AutoIpBtn").Click += (s, e) => UseAutomaticIp();
+        F<Button>("AdapterSettingsBtn").Click += (s, e) =>
+        {
+            try { Process.Start(Path.Combine(Environment.SystemDirectory, "control.exe"), "ncpa.cpl"); }
+            catch (Win32Exception ex) { Say(ex.Message, "Red"); }
+        };
         F<Border>("AdvancedOverlay").PreviewKeyDown += (s, e) =>
         {
             if (e.Key == System.Windows.Input.Key.Escape) CloseAdvanced();
@@ -3524,6 +3538,34 @@ class Ui
             }
             Process.Start(Path.Combine(Environment.SystemDirectory, "mstsc.exe"), "/v:" + target);
             Say("已開啟遠端桌面,請輸入對方電腦的帳號密碼。連線期間對方的螢幕會鎖定。", "Green");
+        });
+    }
+
+    // For a PC left on an old setup, where Restore has no backup to work from.
+    void UseAutomaticIp()
+    {
+        CloseAdvanced(); // It covers the status line.
+        var a = adapters.SelectedItem as Adapter;
+        if (a == null) { Say("找不到有線網卡", "Red"); return; }
+        if (a.Wireless) { Say("Wi-Fi 和熱點不用改,這個按鈕只用於網路線和 Thunderbolt。", "Red"); return; }
+        Guard(async () =>
+        {
+            Say("設定中…如果跳出權限視窗,請按「是」。", "Sub");
+            await Task.Run(() =>
+            {
+                Sys.RunElevated(Net.ConfigSteps(a.Name, new Config { Dhcp = true }, false));
+                if (!Sys.ReadConfig(a.Id).Dhcp) throw new Exception("無法改成自動取得 IP,請再試一次。");
+                // Otherwise Restore, or quitting, would put the old address back.
+                Sys.DeleteBackup(a.Id);
+            });
+            var session = Sys.LoadSession();
+            if (session != null && session[0] == a.Id)
+            {
+                Sys.DeleteSession();
+                StopReceiver();
+                allowedPeer = null;
+            }
+            Say("已改成自動取得 IP。", "Green");
         });
     }
 

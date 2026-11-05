@@ -531,7 +531,11 @@
             <TextBlock Grid.Row="4" Text="DNS(可留白)" VerticalAlignment="Center"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="Dns" Margin="0,2" ToolTip="多個請用逗號分隔" AutomationProperties.Name="DNS"/>
           </Grid>
-          <Button x:Name="AdvancedDoneBtn" Style="{StaticResource Soft}" Background="{DynamicResource Blue}" Foreground="White" FontWeight="SemiBold" Content="完成" Margin="0,10,0,0"/>
+          <UniformGrid Columns="3" Margin="0,10,0,0">
+            <Button x:Name="AutoIpBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="改成自動取得 IP" ToolTip="不看備份,直接把這張網卡改回自動取得 IP 和 DNS" Margin="0,0,4,0"/>
+            <Button x:Name="AdapterSettingsBtn" Style="{StaticResource Soft}" Background="{DynamicResource Field}" Content="網路介面卡…" ToolTip="開啟 Windows 的網路連線設定" Margin="2,0,2,0"/>
+            <Button x:Name="AdvancedDoneBtn" Style="{StaticResource Soft}" Background="{DynamicResource Blue}" Foreground="White" FontWeight="SemiBold" Content="完成" Margin="4,0,0,0"/>
+          </UniformGrid>
         </StackPanel>
       </Border>
     </Border>
