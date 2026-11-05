@@ -1,6 +1,6 @@
 # LanLink(LAN 互連)
 
-快速讓兩台 Windows 電腦直接連線傳檔的小工具。單一執行檔,免安裝,介面支援繁體中文和英文。
+快速讓兩台 Windows 電腦直接連線傳檔的小工具,手機也能透過 Wi-Fi 熱點掃 QR Code 下載。單一執行檔,免安裝,介面支援繁體中文和英文。
 
 目前版本:**0.0.2**,更新內容請看 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
