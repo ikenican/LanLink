@@ -467,6 +467,16 @@
           </DockPanel>
           <Border Style="{StaticResource Sep}"/>
           <DockPanel Margin="0,8">
+            <ToggleButton x:Name="AutoUpdateToggle" Style="{StaticResource Switch}" DockPanel.Dock="Right" AutomationProperties.Name="自動更新"/>
+            <Button x:Name="CheckUpdateBtn" Style="{StaticResource Soft}" Padding="10,4" Background="{DynamicResource Field}" Content="檢查更新" DockPanel.Dock="Right" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <StackPanel Margin="0,0,10,0">
+              <TextBlock Text="自動更新"/>
+              <TextBlock Text="自動下載新版,在關閉程式或待命時安裝" Style="{StaticResource Hint}" TextWrapping="Wrap"/>
+              <TextBlock x:Name="UpdateStatus" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+            </StackPanel>
+          </DockPanel>
+          <Border Style="{StaticResource Sep}"/>
+          <DockPanel Margin="0,8">
             <ToggleButton x:Name="QuitOnCloseToggle" Style="{StaticResource Switch}" DockPanel.Dock="Right" AutomationProperties.Name="關閉視窗時直接退出"/>
             <StackPanel Margin="0,0,10,0">
               <TextBlock Text="關閉視窗時直接退出"/>

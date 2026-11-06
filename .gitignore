@@ -1,6 +1,8 @@
 # Built by build.bat; released as assets, not committed.
 *.exe
 *.zip
+*.exe.old
+*.exe.failed
 
 # Editor settings
 .workbench/

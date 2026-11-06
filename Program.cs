@@ -24,9 +24,9 @@ using Path = System.IO.Path;
 
 [assembly: AssemblyTitle("LAN Link")]
 [assembly: AssemblyProduct("LAN Link")]
-[assembly: AssemblyVersion("0.0.2.0")]
-[assembly: AssemblyFileVersion("0.0.2.0")]
-[assembly: AssemblyInformationalVersion("0.0.2")]
+[assembly: AssemblyVersion("0.0.3.0")]
+[assembly: AssemblyFileVersion("0.0.3.0")]
+[assembly: AssemblyInformationalVersion("0.0.3")]
 
 // Chinese text in the code and XAML doubles as the key into this table.
 static class Lang
@@ -120,6 +120,28 @@ static class Lang
         { "(已連線)", " (online)" },
         { "(已連線 · {0})", " (online · {0})" },
         { "對方電腦", "Other PC" },
+        { "自動更新", "Automatic updates" },
+        { "自動下載新版,在關閉程式或待命時安裝", "Downloads new versions and installs them on quit or while idle" },
+        { "檢查更新", "Check Now" },
+        { "正在檢查更新…", "Checking for updates…" },
+        { "目前版本 v{0}", "Current version: v{0}" },
+        { "已經是最新版本 v{0}({1} 檢查)", "v{0} is up to date (checked {1})" },
+        { "正在下載新版 v{0}…", "Downloading v{0}…" },
+        { "發現新版 v{0},按「立即更新」安裝。", "v{0} is available. Press “Update Now” to install it." },
+        { "立即更新", "Update Now" },
+        { "無法連線到 GitHub,請確認這台能上網後再試一次。", "Can't reach GitHub. Check that this PC is online, then try again." },
+        { "GitHub 上沒有可用的更新。", "GitHub has no usable update." },
+        { "正在安裝新版 v{0},程式會重新啟動…", "Installing v{0}. The app will restart…" },
+        { "新版 v{0} 已下載,關閉程式時會自動安裝。", "v{0} is downloaded and installs when you quit." },
+        { "更新失敗:{0}", "Update failed: {0}" },
+        { "下載的檔案校驗碼不符,已取消更新。", "The download's checksum doesn't match, so the update was canceled." },
+        { "下載的檔案版本不符,已取消更新。", "The download's version doesn't match, so the update was canceled." },
+        { "新版沒有通過自我檢查,可能被防毒軟體攔住,已取消更新。", "The new version failed its self-test, or antivirus may have stopped it. The update was canceled." },
+        { "新版無法啟動,可能被防毒軟體攔住,已換回目前的版本。", "The new version didn't start, and antivirus may have stopped it. The current version was put back." },
+        { "這台的遠端桌面已開啟", "Remote Desktop is on for this PC" },
+        { "這台的遠端桌面已允許,但服務沒有執行,按「一鍵設定」會啟動", "Remote Desktop is allowed, but its service isn't running. “One-Click Setup” starts it" },
+        { "這台的遠端桌面目前是關閉的,按「一鍵設定」後才會開啟", "Remote Desktop is off for this PC. “One-Click Setup” turns it on" },
+        { " 但這台的遠端桌面沒有成功開啟,請檢查 Windows 設定或公司政策。", " But Remote Desktop didn't turn on. Check Windows settings or company policy." },
         { "網路介面卡…", "Adapters…" },
         { "開啟 Windows 的網路連線設定", "Opens the Windows Network Connections window" },
         { "改成自動取得 IP", "Use Automatic IP" },
@@ -449,6 +471,12 @@ static class Net
         };
     }
 
+    public static string RdpStatus(bool denied, bool listening)
+    {
+        if (denied) return "這台的遠端桌面目前是關閉的,按「一鍵設定」後才會開啟";
+        return listening ? "這台的遠端桌面已開啟" : "這台的遠端桌面已允許,但服務沒有執行,按「一鍵設定」會啟動";
+    }
+
     // Turns RDP back off only if it was off before this tool enabled it.
     public static List<string> RdpDisableSteps(bool wasDenied)
     {
@@ -762,6 +790,9 @@ static class Net
         catch (Exception ex) { failures.Add("web test threw: " + ex.Message); }
 
         Qr.SelfTest(check);
+        Updater.SelfTest(check);
+        check(RdpStatus(true, false).Contains("關閉") && RdpStatus(true, true).Contains("關閉"), "rdp denied reads as off");
+        check(RdpStatus(false, true) == "這台的遠端桌面已開啟" && RdpStatus(false, false).Contains("服務"), "rdp on or service stopped");
         check(WifiQrText("My;Net", "a\"b:c\\d") == "WIFI:T:WPA;S:My\\;Net;P:a\\\"b\\:c\\\\d;;", "wifi qr text");
 
         var webAuto = WebSteps("E", true);
@@ -1229,6 +1260,208 @@ class Adapter
     public bool Hotspot { get { return Wireless && Ip == Net.HotspotIp; } }
     public bool HotspotClient { get { return Wireless && !Hotspot && Ip != null && Ip.StartsWith("192.168.137."); } }
     public override string ToString() { return (Thunderbolt ? "Thunderbolt" : Hotspot ? Lang.L("Wi-Fi 熱點") : Name) + Net.LinkText(Up, Speed, Wireless); }
+}
+
+// Updates come only from this repository's latest release, over HTTPS, and must match the checksum GitHub publishes.
+// ponytail: the exe is unsigned, so this trusts the GitHub account; sign releases and check the signature if that ever matters.
+static class Updater
+{
+    public class Release
+    {
+        public string Version, Url, Sha256;
+    }
+
+    const string LatestUrl = "https://api.github.com/repos/ikenican/LanLink/releases/latest";
+    const string DownloadRoot = "https://github.com/ikenican/LanLink/releases/download/";
+    const string AssetName = "LanLink.exe";
+    const int MaxDownload = 64 << 20, SelfTestMs = 60000, StartMs = 30000;
+    public const string StartedSignalName = "Local\\LanLink.Updated";
+
+    // A Version with a missing part compares as older, so 0.0.3.0 would look newer than 0.0.3 without this.
+    public static bool IsNewer(Version current, string latest)
+    {
+        Func<Version, Version> three = v => new Version(v.Major, v.Minor, Math.Max(v.Build, 0));
+        return three(new Version(latest)) > three(current);
+    }
+
+    // Null unless the release names exactly the file expected, at the address expected, with a checksum.
+    public static Release Parse(string json)
+    {
+        var root = new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+        if (root == null || !root.ContainsKey("tag_name") || !root.ContainsKey("assets")) return null;
+        string tag = root["tag_name"] as string ?? "";
+        Version parsed;
+        if (!tag.StartsWith("v") || !System.Version.TryParse(tag.Substring(1), out parsed)) return null;
+        string url = DownloadRoot + tag + "/" + AssetName;
+        foreach (var item in (root["assets"] as object[] ?? new object[0]).OfType<Dictionary<string, object>>())
+        {
+            if (!item.ContainsKey("browser_download_url") || !item.ContainsKey("digest")) continue;
+            string digest = item["digest"] as string ?? "";
+            if (item["browser_download_url"] as string != url || !digest.StartsWith("sha256:") || digest.Length != 71) continue;
+            return new Release { Version = tag.Substring(1), Url = url, Sha256 = digest.Substring(7).ToLowerInvariant() };
+        }
+        return null;
+    }
+
+    static WebResponse Open(string url)
+    {
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        var request = (HttpWebRequest)WebRequest.Create(url);
+        request.UserAgent = "LanLink";
+        request.Timeout = 15000;
+        request.ReadWriteTimeout = 30000;
+        return request.GetResponse();
+    }
+
+    public static Release Latest()
+    {
+        using (var response = Open(LatestUrl))
+        using (var reader = new StreamReader(response.GetResponseStream()))
+            return Parse(reader.ReadToEnd());
+    }
+
+    public static string Sha256Of(string path)
+    {
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+        using (var f = File.OpenRead(path))
+            return string.Concat(sha.ComputeHash(f).Select(b => b.ToString("x2")));
+    }
+
+    static string PendingPath(string exe) { return Path.Combine(Path.GetDirectoryName(exe), "LanLink.update.exe"); }
+
+    // Leaves a verified copy beside the program, or throws. Running its self-test also shows whether antivirus lets it start.
+    public static void Download(Release r, string exe)
+    {
+        string pending = PendingPath(exe);
+        using (var response = Open(r.Url))
+        using (var source = response.GetResponseStream())
+        using (var target = File.Create(pending))
+        {
+            var buf = new byte[1 << 16];
+            long total = 0;
+            for (int n; (n = source.Read(buf, 0, buf.Length)) > 0; )
+            {
+                total += n;
+                if (total > MaxDownload) throw new InvalidDataException("下載的檔案校驗碼不符,已取消更新。");
+                target.Write(buf, 0, n);
+            }
+        }
+        try
+        {
+            if (Sha256Of(pending) != r.Sha256) throw new InvalidDataException("下載的檔案校驗碼不符,已取消更新。");
+            if (FileVersionInfo.GetVersionInfo(pending).ProductVersion != r.Version) throw new InvalidDataException("下載的檔案版本不符,已取消更新。");
+            using (var p = Process.Start(new ProcessStartInfo(pending, "--selftest") { UseShellExecute = false, CreateNoWindow = true }))
+            {
+                bool done = p.WaitForExit(SelfTestMs);
+                if (!done) p.Kill();
+                if (!done || p.ExitCode != 0) throw new InvalidDataException("新版沒有通過自我檢查,可能被防毒軟體攔住,已取消更新。");
+            }
+        }
+        catch
+        {
+            TryDelete(pending);
+            throw;
+        }
+    }
+
+    public static bool HasPending(string exe) { return File.Exists(PendingPath(exe)); }
+
+    // A running exe can be renamed but not overwritten.
+    public static void Swap(string exe, string pending = null)
+    {
+        pending = pending ?? PendingPath(exe);
+        TryDelete(exe + ".old");
+        File.Move(exe, exe + ".old");
+        try { File.Move(pending, exe); }
+        catch
+        {
+            File.Move(exe + ".old", exe);
+            throw;
+        }
+    }
+
+    // The failed copy may still be stuck running, which is why it is renamed and not deleted.
+    public static void RollBack(string exe)
+    {
+        TryDelete(exe + ".failed");
+        File.Move(exe, exe + ".failed");
+        File.Move(exe + ".old", exe);
+    }
+
+    // Replaces the program and restarts it. The new copy signals as soon as it runs; without that, the old version goes back.
+    public static void InstallAndRestart(string exe, bool hidden)
+    {
+        Swap(exe);
+        using (var started = new EventWaitHandle(false, EventResetMode.AutoReset, StartedSignalName))
+        {
+            Process p = null;
+            try
+            {
+                p = Process.Start(exe, "--after-update " + Process.GetCurrentProcess().Id + " " + (hidden ? "tray" : "show"));
+                if (started.WaitOne(StartMs)) return;
+                p.Kill();
+            }
+            catch (Exception) { } // Reported below.
+            RollBack(exe);
+            throw new InvalidOperationException("新版無法啟動,可能被防毒軟體攔住,已換回目前的版本。");
+        }
+    }
+
+    public static void Cleanup(string exe)
+    {
+        TryDelete(exe + ".old");
+        TryDelete(exe + ".failed");
+        TryDelete(PendingPath(exe));
+    }
+
+    static void TryDelete(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    public static void SelfTest(Action<bool, string> check)
+    {
+        check(IsNewer(new Version("0.0.3.0"), "0.0.4") && IsNewer(new Version("0.0.3.0"), "0.1.0"), "update is newer");
+        check(!IsNewer(new Version("0.0.3.0"), "0.0.3") && !IsNewer(new Version("0.0.3.0"), "0.0.2"), "same or older is no update");
+
+        string hash = new string('a', 64);
+        Func<string, string, string, string> json = (tag, url, digest) => "{\"tag_name\":\"" + tag + "\",\"assets\":[{\"name\":\"other.zip\"},{\"browser_download_url\":\"" + url + "\",\"digest\":\"" + digest + "\"}]}";
+        var good = Parse(json("v0.0.4", DownloadRoot + "v0.0.4/LanLink.exe", "sha256:" + hash));
+        check(good != null && good.Version == "0.0.4" && good.Sha256 == hash && good.Url == DownloadRoot + "v0.0.4/LanLink.exe", "release parsed");
+        check(Parse(json("v0.0.4", "https://example.com/v0.0.4/LanLink.exe", "sha256:" + hash)) == null, "release from elsewhere refused");
+        check(Parse(json("v0.0.4", DownloadRoot + "v0.0.3/LanLink.exe", "sha256:" + hash)) == null, "release for another tag refused");
+        check(Parse(json("v0.0.4", DownloadRoot + "v0.0.4/LanLink.exe", "md5:abc")) == null, "release without a checksum refused");
+        check(Parse(json("latest", DownloadRoot + "latest/LanLink.exe", "sha256:" + hash)) == null, "release without a version refused");
+        check(Parse("{\"message\":\"Not Found\"}") == null && Parse("[]") == null, "not a release");
+
+        string tmp = Path.Combine(Path.GetTempPath(), "LanLinkUpdateTest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            string exe = Path.Combine(tmp, "a.exe"), pending = PendingPath(exe);
+            check(Path.GetDirectoryName(pending) == tmp, "update stays beside the program");
+            File.WriteAllText(exe, "old");
+            File.WriteAllText(pending, "new");
+            check(HasPending(exe), "pending update found");
+            Swap(exe);
+            check(File.ReadAllText(exe) == "new" && File.ReadAllText(exe + ".old") == "old" && !HasPending(exe), "swap installs the new copy");
+            RollBack(exe);
+            check(File.ReadAllText(exe) == "old" && File.Exists(exe + ".failed") && !File.Exists(exe + ".old"), "rollback restores the old copy");
+            bool threw = false;
+            try { Swap(exe, Path.Combine(tmp, "missing.exe")); }
+            catch (FileNotFoundException) { threw = true; }
+            check(threw && File.ReadAllText(exe) == "old", "failed swap keeps the program");
+            File.WriteAllText(exe + ".old", "x");
+            File.WriteAllText(pending, "x");
+            Cleanup(exe);
+            check(File.Exists(exe) && !File.Exists(exe + ".old") && !File.Exists(exe + ".failed") && !HasPending(exe), "cleanup keeps only the program");
+            File.WriteAllBytes(pending, Encoding.ASCII.GetBytes("abc"));
+            check(Sha256Of(pending) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha-256 check value");
+        }
+        finally { Directory.Delete(tmp, true); }
+    }
 }
 
 // QR Code, byte mode, low error correction. Stops at version 6 (134 bytes), which fits an address and any normal Wi-Fi login;
@@ -1937,6 +2170,17 @@ static class Sys
         }
     }
 
+    public static bool AutoUpdate
+    {
+        get { return !File.Exists(NoAutoUpdatePath); }
+        set
+        {
+            Directory.CreateDirectory(DataDir);
+            if (value) File.Delete(NoAutoUpdatePath);
+            else File.WriteAllText(NoAutoUpdatePath, "1");
+        }
+    }
+
     public static bool WindowsUi
     {
         get { return File.Exists(WindowsUiPath); }
@@ -1959,6 +2203,7 @@ static class Sys
     public static readonly string SendToPath = Path.Combine(DataDir, "sendto.txt");
     static readonly string QuitOnClosePath = Path.Combine(DataDir, "quit-on-close.txt");
     static readonly string WindowsUiPath = Path.Combine(DataDir, "windows-ui.txt");
+    static readonly string NoAutoUpdatePath = Path.Combine(DataDir, "no-auto-update.txt");
     static readonly string NoAskRestorePath = Path.Combine(DataDir, "no-ask-restore.txt");
     static readonly string AutoRestorePath = Path.Combine(DataDir, "auto-restore.txt");
     static readonly string RdpBackupPath = Path.Combine(DataDir, "rdp.txt");
@@ -2138,6 +2383,17 @@ static class Sys
         return Exec(SystemExe("netsh"), "advfirewall firewall show rule name=" + rule, out ignored) == 0;
     }
 
+    public static bool RdpDenied()
+    {
+        var value = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server", "fDenyTSConnections", 1);
+        return !(value is int) || (int)value != 0;
+    }
+
+    public static bool RdpListening()
+    {
+        return IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(e => e.Port == Net.RdpPort);
+    }
+
     // Why this PC cannot accept RDP, or null when it can.
     public static string RdpBlockReason()
     {
@@ -2254,6 +2510,13 @@ class Ui
     int browseRequest;
     System.Windows.Forms.NotifyIcon tray; // Null in a copy opened only to send files.
     System.Windows.Forms.ToolStripItem trayShow, trayQuit;
+    volatile bool receiving;
+    bool checkingUpdate;
+    string downloadedVersion, updateNoteKey, updateNoteColor;
+    string[] updateNoteArgs;
+    Updater.Release updateAvailable;
+    bool installRequested;
+    DateTime lastUpdateCheck = DateTime.MinValue;
     bool exiting, restoringForExit;
     WebShare web;
     string webAdapterId;
@@ -2469,6 +2732,15 @@ class Ui
         {
             if (e.Key == System.Windows.Input.Key.Escape) CloseSettings();
         };
+        RoutedEventHandler rdpChanged = (s, e) => ShowRdpStatus();
+        rdpToggle.Checked += rdpChanged;
+        rdpToggle.Unchecked += rdpChanged;
+        BindOption("AutoUpdateToggle", () => Sys.AutoUpdate, on => Sys.AutoUpdate = on);
+        var checkUpdate = F<Button>("CheckUpdateBtn");
+        checkUpdate.IsEnabled = firstCopy; // A send-only window must not replace the program under the main one.
+        checkUpdate.Click += async (s, e) => await UpdateWork(true, () => updateAvailable != null ? InstallUpdate(updateAvailable, true) : CheckForUpdate(true));
+        UpdateNote(false, "Sub", "目前版本 v{0}", CurrentVersion().ToString(3));
+        if (firstCopy) StartUpdateTimer();
         BindOption("AutoStartToggle", () => Sys.AutoStart, on => Sys.AutoStart = on);
         BindOption("QuitOnCloseToggle", () => Sys.QuitOnClose, on => Sys.QuitOnClose = on);
         if (Sys.WindowsUi)
@@ -2603,8 +2875,135 @@ class Ui
         w.Activate();
     }
 
+    void ShowRdpStatus()
+    {
+        if (!rdpToggle.IsEnabled) return; // Already explains why this PC can't accept connections.
+        F<TextBlock>("RdpHint").Text = Lang.L(rdpToggle.IsChecked == true
+            ? Net.RdpStatus(Sys.RdpDenied(), Sys.RdpListening())
+            : "對方可用這台的帳號密碼登入並操作這台");
+    }
+
+    // Created here and not on Loaded, which never fires while starting hidden in the tray.
+    void StartUpdateTimer()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        timer.Tick += async (s, e) =>
+        {
+            timer.Interval = TimeSpan.FromHours(1);
+            if (!Sys.AutoUpdate) return;
+            if (downloadedVersion != null || DateTime.Now - lastUpdateCheck > TimeSpan.FromHours(24)) await UpdateWork(false, () => CheckForUpdate(false));
+        };
+        timer.Start();
+    }
+
+    // A restart would cut off anything in progress.
+    bool IsIdle()
+    {
+        return !receiving && sendClient == null && web == null && hotspotToggle.IsChecked != true && actions[0].IsEnabled;
+    }
+
+    static Version CurrentVersion() { return Assembly.GetExecutingAssembly().GetName().Version; }
+
+    // Shown under the switch in Settings. The status line also gets it when Settings is closed and this is worth interrupting for.
+    void UpdateNote(bool announce, string color, string key, params string[] args)
+    {
+        updateNoteKey = key;
+        updateNoteColor = color;
+        updateNoteArgs = args;
+        ShowUpdateNote();
+        if (announce && F<Border>("SettingsOverlay").Visibility != Visibility.Visible)
+            Say(F<TextBlock>("UpdateStatus").Text, color);
+    }
+
+    void ShowUpdateNote()
+    {
+        var note = F<TextBlock>("UpdateStatus");
+        note.Text = string.Format(Lang.L(updateNoteKey), updateNoteArgs.Select(a => (object)Lang.L(a)).ToArray());
+        note.SetResourceReference(TextBlock.ForegroundProperty, updateNoteColor);
+    }
+
+    // The same button checks, and installs once a new version is known.
+    void ShowUpdateButton()
+    {
+        var button = F<Button>("CheckUpdateBtn");
+        button.Content = Lang.L(updateAvailable != null ? "立即更新" : "檢查更新");
+        button.SetResourceReference(Control.BackgroundProperty, updateAvailable != null ? "Blue" : "Field");
+        if (updateAvailable != null) button.Foreground = Brushes.White;
+        else button.ClearValue(Control.ForegroundProperty);
+    }
+
+    async Task CheckForUpdate(bool asked)
+    {
+        if (asked) UpdateNote(false, "Sub", "正在檢查更新…");
+        var current = CurrentVersion();
+        var latest = await Task.Run(() => Updater.Latest());
+        lastUpdateCheck = DateTime.Now;
+        if (latest == null)
+        {
+            if (asked) UpdateNote(true, "Red", "GitHub 上沒有可用的更新。");
+            return;
+        }
+        updateAvailable = Updater.IsNewer(current, latest.Version) ? latest : null;
+        ShowUpdateButton();
+        if (updateAvailable == null) UpdateNote(asked, "Green", "已經是最新版本 v{0}({1} 檢查)", current.ToString(3), lastUpdateCheck.ToString("MM/dd HH:mm"));
+        // Checking by hand only reports: installing is a separate choice.
+        else if (asked) UpdateNote(true, "Green", "發現新版 v{0},按「立即更新」安裝。", latest.Version);
+        else await InstallUpdate(latest, false);
+    }
+
+    async Task InstallUpdate(Updater.Release release, bool asked)
+    {
+        if (asked) installRequested = true;
+        if (downloadedVersion != release.Version)
+        {
+            UpdateNote(false, "Sub", "正在下載新版 v{0}…", release.Version);
+            await Task.Run(() => Updater.Download(release, Sys.ProgramPath));
+            downloadedVersion = release.Version;
+        }
+        // A window in use isn't restarted unless the user asked for this.
+        if (IsIdle() && (asked || !w.IsVisible))
+        {
+            UpdateNote(true, "Sub", "正在安裝新版 v{0},程式會重新啟動…", release.Version);
+            bool hidden = !w.IsVisible;
+            downloadedVersion = null; // After a failed install there is no copy left to put in place on quit.
+            await Task.Run(() => Updater.InstallAndRestart(Sys.ProgramPath, hidden));
+            Quit();
+        }
+        else UpdateNote(true, "Green", "新版 v{0} 已下載,關閉程式時會自動安裝。", release.Version);
+    }
+
+    // Automatic checks stay quiet on failure: a PC on a direct cable often has no internet.
+    async Task UpdateWork(bool asked, Func<Task> work)
+    {
+        if (checkingUpdate) return;
+        checkingUpdate = true;
+        var button = F<Button>("CheckUpdateBtn");
+        button.IsEnabled = false;
+        try { await work(); }
+        catch (WebException)
+        {
+            if (asked) UpdateNote(true, "Red", "無法連線到 GitHub,請確認這台能上網後再試一次。");
+        }
+        catch (Exception ex)
+        {
+            if (asked || ex is InvalidOperationException) UpdateNote(true, "Red", "更新失敗:{0}", ex.Message);
+        }
+        finally
+        {
+            checkingUpdate = false;
+            button.IsEnabled = true;
+        }
+    }
+
     void Quit()
     {
+        // Best effort: the next launch simply keeps the current version and checks again.
+        // Turning automatic updates off also cancels an install nobody asked for.
+        if (downloadedVersion != null && (Sys.AutoUpdate || installRequested) && Updater.HasPending(Sys.ProgramPath))
+        {
+            try { Updater.Swap(Sys.ProgramPath); }
+            catch (Exception) { }
+        }
         exiting = true;
         Application.Current.Shutdown();
     }
@@ -2904,6 +3303,7 @@ class Ui
         w.Title = Lang.Swap(w.Title);
         UpdateLabels();
         ShowHotspotInfo(hotspotSsid, hotspotPass);
+        ShowUpdateNote();
         RefreshAdapters();
         ApplyTheme();
         // The button names the language it switches to.
@@ -3162,10 +3562,14 @@ class Ui
                 steps.AddRange(allowRdp ? Net.RdpEnableSteps(other, a.Wireless) : Net.RdpDisableSteps(Sys.RdpWasDenied()));
                 Sys.RunElevated(steps);
                 if (!allowRdp) Sys.DeleteRdpBackup();
+                // The service can take a moment after starting, so this allows a few seconds before saying it failed.
+                for (int i = 0; allowRdp && i < 5 && !Sys.RdpListening(); i++) Thread.Sleep(1000);
+                if (allowRdp && (Sys.RdpDenied() || !Sys.RdpListening())) rdpNote = Lang.L(" 但這台的遠端桌面沒有成功開啟,請檢查 Windows 設定或公司政策。");
                 Sys.SaveSession(a.Id, other, c);
             });
             allowedPeer = other;
             StopWeb();
+            ShowRdpStatus();
             if (openFirewall)
             {
                 // Started only after the rule exists, so Windows doesn't pop its own firewall prompt.
@@ -3459,6 +3863,7 @@ class Ui
                 if (((IPEndPoint)c.Client.RemoteEndPoint).Address.ToString() != allowedPeer) continue;
                 c.SendTimeout = c.ReceiveTimeout = 60000;
                 string msg = null, color = "Green", folder = Sys.Inbox;
+                receiving = true;
                 try
                 {
                     int files = Transfer.Receive(c.GetStream(), folder, Reporter("接收中", false), chosen => folder = chosen);
@@ -3470,6 +3875,7 @@ class Ui
                     msg = Lang.L("接收中斷,未完成的檔案已清除。") + Lang.L(ex.Message);
                     color = "Red";
                 }
+                receiving = false;
                 // A peer only listing folders leaves the screen alone.
                 if (msg != null) w.Dispatcher.BeginInvoke(new Action(() => { Say(msg, color); HideProgress(); }));
             }
@@ -3607,16 +4013,30 @@ static class Program
 {
     public const string ShowSignalName = "Local\\LanLink.Show";
 
+    // Tells the old copy this one runs, then waits for it to leave so this one can take the single-instance lock.
+    static string[] FinishUpdate(string oldProcess, string mode)
+    {
+        try
+        {
+            using (var started = EventWaitHandle.OpenExisting(Updater.StartedSignalName)) started.Set();
+            using (var old = Process.GetProcessById(int.Parse(oldProcess))) old.WaitForExit(15000);
+        }
+        catch (Exception) { } // The old copy is already gone.
+        return mode == "tray" ? new[] { "--tray" } : new string[0];
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--selftest") return Net.SelfTest();
         Lang.Load();
         if (args.Length == 3 && args[0] == "--admin") return Sys.RunSteps(args[1], args[2]);
+        if (args.Length == 3 && args[0] == "--after-update") args = FinishUpdate(args[1], args[2]);
         bool hidden = args.Length == 1 && args[0] == "--tray";
         bool first;
         using (new Mutex(true, "Local\\LanLink.Running", out first))
         {
+            if (first) Updater.Cleanup(Sys.ProgramPath);
             // One copy keeps the receive port and tray icon. A plain launch brings it up; a startup launch has nothing to do.
             if (!first && hidden) return 0;
             if (!first && args.Length == 0)
