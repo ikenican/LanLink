@@ -24,9 +24,9 @@ using Path = System.IO.Path;
 
 [assembly: AssemblyTitle("LAN Link")]
 [assembly: AssemblyProduct("LAN Link")]
-[assembly: AssemblyVersion("0.0.3.0")]
-[assembly: AssemblyFileVersion("0.0.3.0")]
-[assembly: AssemblyInformationalVersion("0.0.3")]
+[assembly: AssemblyVersion("0.0.4.0")]
+[assembly: AssemblyFileVersion("0.0.4.0")]
+[assembly: AssemblyInformationalVersion("0.0.4")]
 
 // Chinese text in the code and XAML doubles as the key into this table.
 static class Lang
@@ -179,6 +179,9 @@ static class Lang
         { "還沒有檔案,把檔案或資料夾拖到這裡。", "No files yet. Drag files or folders here." },
         { "資料夾:{0}({1} 個檔案)", "Folder: {0} ({1} files)" },
         { "對方開始下載:{0}", "The other PC started downloading: {0}" },
+        { "對方也能從網頁上傳檔案,會存到收件位置。", " The other device can also upload files from the page; they go to the inbox location." },
+        { "上傳檔案給這台", "Upload files to this PC" },
+        { "上傳完成 {0} 個,失敗 {1} 個。", "Uploaded {0}, failed {1}." },
         { "LAN 互連 檔案下載", "LAN Link Downloads" },
         { "對方還沒有選擇檔案,這個頁面會自動更新。", "No files have been shared yet. This page updates by itself." },
         { "下載資料夾 {0}.zip", "Download folder {0}.zip" },
@@ -836,7 +839,7 @@ static class Transfer
     static readonly byte[] SpeedMagic = Encoding.ASCII.GetBytes("LANSPEED");
     static readonly byte[] FoldersMagic = Encoding.ASCII.GetBytes("LANDIRS1");
     const int MaxPathBytes = 8192, BufferSize = 1 << 20;
-    const string PartSuffix = ".lanlink-part";
+    public const string PartSuffix = ".lanlink-part";
     static int speedMs = 5000; // Duration of each speed test direction; the self-test shortens it.
 
     // Speed test frames: int32 length, then data, ending with length 0. Data stays in memory so disks don't affect the result.
@@ -1786,16 +1789,20 @@ class WebShare
     const int MaxRequest = 8192, BufferSize = 1 << 20;
     readonly TcpListener listener;
     readonly Func<string, bool> allowed;
-    readonly Action<string> downloading;
+    readonly Action<string> downloading, received;
+    readonly Func<string> inbox;
     readonly object changing = new object();
     volatile Content content = new Content();
 
     public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
 
-    public WebShare(IPAddress address, int port, Func<string, bool> allowed, Action<string> downloading)
+    // Uploads go to inbox(); received gets each saved file's full path.
+    public WebShare(IPAddress address, int port, Func<string, bool> allowed, Action<string> downloading, Func<string> inbox, Action<string> received)
     {
         this.allowed = allowed;
         this.downloading = downloading;
+        this.inbox = inbox;
+        this.received = received;
         listener = new TcpListener(address, port);
         listener.Start();
         new Thread(Accept) { IsBackground = true }.Start();
@@ -1851,7 +1858,11 @@ class WebShare
                 client.ReceiveTimeout = 15000;
                 client.SendTimeout = 60000;
                 var s = client.GetStream();
-                Respond(s, ParseRequest(ReadHead(s)));
+                string head = ReadHead(s);
+                long length;
+                string name = ParseUpload(head, out length);
+                if (name != null) Receive(s, name, length);
+                else Respond(s, ParseRequest(head));
             }
         }
         catch (Exception) { }
@@ -1875,6 +1886,51 @@ class WebShare
         var parts = head.Split(new[] { "\r\n" }, StringSplitOptions.None)[0].Split(' ');
         if (parts.Length != 3 || parts[0] != "GET" || !parts[2].StartsWith("HTTP/")) return null;
         return parts[1].Split('?')[0];
+    }
+
+    // The safe file name of a "POST /u?n=<name>" upload with a Content-Length, or null for anything else.
+    public static string ParseUpload(string head, out long length)
+    {
+        length = -1;
+        var lines = head.Split(new[] { "\r\n" }, StringSplitOptions.None);
+        var parts = lines[0].Split(' ');
+        if (parts.Length != 3 || parts[0] != "POST" || !parts[2].StartsWith("HTTP/") || !parts[1].StartsWith("/u?n=")) return null;
+        foreach (var l in lines)
+            if (l.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase) && !long.TryParse(l.Substring(15).Trim(), out length)) length = -1;
+        // Only a bare name: the page sends files one by one, and nothing may land outside the inbox.
+        string name = Net.SafeRelativePath(Uri.UnescapeDataString(parts[1].Substring(5)));
+        return length >= 0 && name != null && !name.Contains("\\") ? name : null;
+    }
+
+    // Writes to a part file first, so a broken upload never leaves a file that looks complete.
+    void Receive(Stream s, string name, long length)
+    {
+        string root = inbox();
+        Directory.CreateDirectory(root);
+        string target = Net.UniquePath(Path.Combine(root, name), p => File.Exists(p) || Directory.Exists(p));
+        string part = target + Transfer.PartSuffix;
+        try
+        {
+            var buf = new byte[BufferSize];
+            using (var f = new FileStream(part, FileMode.Create, FileAccess.Write))
+                for (long left = length; left > 0; )
+                {
+                    int n = s.Read(buf, 0, (int)Math.Min(left, buf.Length));
+                    if (n == 0) throw new EndOfStreamException();
+                    f.Write(buf, 0, n);
+                    left -= n;
+                }
+            File.Move(part, target);
+        }
+        catch
+        {
+            File.Delete(part);
+            throw;
+        }
+        received(target);
+        byte[] ok = Encoding.ASCII.GetBytes("OK");
+        Head(s, "200 OK", "text/plain", ok.Length, null);
+        s.Write(ok, 0, ok.Length);
     }
 
     public static bool TryIndex(string path, string prefix, int count, out int index)
@@ -1973,7 +2029,6 @@ class WebShare
     {
         string title = WebUtility.HtmlEncode(Lang.L("LAN 互連 檔案下載"));
         var b = new StringBuilder("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>" + title + "</title>");
-        if (c.Entries.Count == 0) b.Append("<meta http-equiv=\"refresh\" content=\"3\">");
         b.Append("<style>:root{color-scheme:light dark}body{font:16px system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px}");
         b.Append("a{display:block;padding:12px 14px;margin:8px 0;border:1px solid #8886;border-radius:10px;text-decoration:none}small{opacity:.7}hr{border:0;border-top:1px solid #8886;margin:24px 0}</style></head><body>");
         b.Append("<h2>" + title + "</h2>");
@@ -1996,6 +2051,17 @@ class WebShare
                 for (int k = 0; k < e.Count; k++) b.Append(Link("/f/" + (e.First + k), files[k].Rel, files[k].Length));
             }
         }
+        b.Append("<hr><h3>" + WebUtility.HtmlEncode(Lang.L("上傳檔案給這台")) + "</h3><input type=\"file\" id=\"u\" multiple>");
+        b.Append("<p id=\"s\" data-done=\"" + WebUtility.HtmlEncode(Lang.L("上傳完成 {0} 個,失敗 {1} 個。")) + "\"></p>");
+        // One file at a time, and the empty page's refresh waits, so nothing cuts an upload short.
+        b.Append("<script>var busy=0,s=document.getElementById('s');");
+        b.Append("document.getElementById('u').onchange=function(){var q=[].slice.call(this.files),i=0,ok=0;this.value='';busy=1;");
+        b.Append("(function next(){if(i==q.length){busy=0;s.textContent=s.dataset.done.replace('{0}',ok).replace('{1}',q.length-ok);return}");
+        b.Append("var f=q[i++],x=new XMLHttpRequest();x.open('POST','/u?n='+encodeURIComponent(f.name));");
+        b.Append("x.upload.onprogress=function(e){if(e.total)s.textContent=f.name+' '+Math.floor(e.loaded*100/e.total)+'%'};");
+        b.Append("x.onload=function(){if(x.status==200)ok++;next()};x.onerror=next;x.send(f)})()};");
+        if (c.Entries.Count == 0) b.Append("setInterval(function(){if(!busy)location.reload()},3000);");
+        b.Append("</script>");
         b.Append("<hr>" + Link("/LanLink.exe", Lang.L("下載 LAN 互連工具"), new FileInfo(Sys.ProgramPath).Length));
         b.Append("</body></html>");
         return b.ToString();
@@ -2005,6 +2071,12 @@ class WebShare
     {
         check(ParseRequest("GET /f/1?x=2 HTTP/1.1\r\nHost: a\r\n\r\n") == "/f/1", "web request path");
         check(ParseRequest("POST /f/1 HTTP/1.1\r\n\r\n") == null && ParseRequest("") == null && ParseRequest("GET /a b HTTP/1.1\r\n\r\n") == null, "web request refused");
+        long size;
+        check(ParseUpload("POST /u?n=%E6%AA%94%20a.txt HTTP/1.1\r\ncontent-length: 5\r\n\r\n", out size) == "檔 a.txt" && size == 5, "upload request");
+        foreach (var bad in new[] { "POST /u?n=a.txt HTTP/1.1\r\n\r\n", "POST /u?n=a.txt HTTP/1.1\r\nContent-Length: -1\r\n\r\n", "POST /u?n=a.txt HTTP/1.1\r\nContent-Length: x\r\n\r\n",
+            "POST /u?n=..%5Ca.txt HTTP/1.1\r\nContent-Length: 1\r\n\r\n", "POST /u?n=d%2Fa.txt HTTP/1.1\r\nContent-Length: 1\r\n\r\n", "POST /u?n=a%3Ab HTTP/1.1\r\nContent-Length: 1\r\n\r\n",
+            "POST /u?n=CON HTTP/1.1\r\nContent-Length: 1\r\n\r\n", "POST /u?n= HTTP/1.1\r\nContent-Length: 1\r\n\r\n", "GET /u?n=a.txt HTTP/1.1\r\nContent-Length: 1\r\n\r\n" })
+            check(ParseUpload(bad, out size) == null, "upload refused: " + bad.Split('\r')[0]);
         int n;
         check(TryIndex("/f/2", "/f/", 3, out n) && n == 2, "web index");
         check(!TryIndex("/f/3", "/f/", 3, out n) && !TryIndex("/f/-1", "/f/", 3, out n) && !TryIndex("/f/..\\x", "/f/", 3, out n) && !TryIndex("/f/", "/f/", 3, out n) && !TryIndex("/f/99999999999", "/f/", 3, out n), "web index refused");
@@ -2024,15 +2096,28 @@ class WebShare
         File.WriteAllBytes(Path.Combine(dst, "two.bin"), big);
         File.WriteAllBytes(Path.Combine(dst, "empty.txt"), new byte[0]);
         var started = new List<string>();
-        var web = new WebShare(IPAddress.Loopback, 0, a => true, name => { lock (started) started.Add(name); });
+        string up = Path.Combine(tmp, "up");
+        var saved = new List<string>();
+        var web = new WebShare(IPAddress.Loopback, 0, a => true, name => { lock (started) started.Add(name); }, () => up, p => { lock (saved) saved.Add(p); });
         try
         {
             string root = "http://127.0.0.1:" + web.Port;
             var http = new WebClient { Proxy = null, Encoding = Encoding.UTF8 };
-            check(http.DownloadString(root + "/").Contains("refresh"), "empty page refreshes");
+            check(http.DownloadString(root + "/").Contains("reload"), "empty page refreshes");
             web.Add(new[] { single, folder });
             string page = http.DownloadString(root + "/");
-            check(page.Contains("a&amp;b 檔案.bin") && page.Contains("/z/1") && !page.Contains("refresh") && !page.Contains(src), "page lists items without paths");
+            check(page.Contains("a&amp;b 檔案.bin") && page.Contains("/z/1") && !page.Contains("reload") && !page.Contains(src) && page.Contains("/u?n="), "page lists items without paths");
+
+            string upUrl = root + "/u?n=" + Uri.EscapeDataString("上傳 a.bin");
+            check(Encoding.ASCII.GetString(http.UploadData(upUrl, big)) == "OK", "upload accepted");
+            http.UploadData(upUrl, new byte[0]);
+            check(File.ReadAllBytes(Path.Combine(up, "上傳 a.bin")).SequenceEqual(big) && new FileInfo(Path.Combine(up, "上傳 a (1).bin")).Length == 0, "upload saved without overwriting");
+            check(Directory.GetFiles(up).Length == 2, "upload leaves no part files");
+            lock (saved) check(saved.Count == 2 && saved[1] == Path.Combine(up, "上傳 a (1).bin"), "uploads reported");
+            bool upBlocked = false;
+            try { http.UploadData(root + "/u?n=..%5Csecret2.txt", new byte[] { 1 }); }
+            catch (WebException) { upBlocked = true; }
+            check(upBlocked && !File.Exists(Path.Combine(tmp, "secret2.txt")), "upload refuses escaping names");
 
             check(http.DownloadData(root + "/f/0").SequenceEqual(big), "single file download");
             check((http.ResponseHeaders["Content-Disposition"] ?? "").Contains("UTF-8''a%26b"), "download name");
@@ -2064,7 +2149,7 @@ class WebShare
                 check(blocked, "web refuses " + refused);
             }
             web.Clear();
-            check(http.DownloadString(root + "/").Contains("refresh"), "cleared list");
+            check(http.DownloadString(root + "/").Contains("reload"), "cleared list");
         }
         finally
         {
@@ -3135,7 +3220,8 @@ class Ui
             });
             // Started only after the rule exists, so Windows doesn't pop its own firewall prompt.
             web = new WebShare(IPAddress.Any, Net.WebPort, Net.IsWebClient, name => w.Dispatcher.BeginInvoke(new Action(() =>
-                Say(string.Format(Lang.L("對方開始下載:{0}"), name), "Green"))));
+                Say(string.Format(Lang.L("對方開始下載:{0}"), name), "Green"))), () => Sys.Inbox, path => w.Dispatcher.BeginInvoke(new Action(() =>
+                Say(string.Format(Lang.L("收到 {0} 個檔案,存在 {1}。"), 1, Path.GetDirectoryName(path)), "Green"))));
             webAdapterId = a.Id;
             webOnHotspot = a.Hotspot;
             ShowWebOverlay();
@@ -3166,6 +3252,7 @@ class Ui
         F<TextBlock>("WebHint").Text = !webOnHotspot ? Lang.L("在另一台的瀏覽器輸入這個網址,對方不用裝工具,也不用改設定。")
             : hotspotSsid != null ? string.Format(Lang.L("另一台先連上熱點 {0}(密碼 {1}),再用瀏覽器輸入這個網址。"), hotspotSsid, hotspotPass)
             : Lang.L("另一台先連上這台的熱點,再用瀏覽器輸入這個網址。");
+        F<TextBlock>("WebHint").Text += Lang.L("對方也能從網頁上傳檔案,會存到收件位置。");
         if (!webOnHotspot) return;
         F<Image>("WifiQrImage").Source = hotspotSsid == null ? null : QrImage(Net.WifiQrText(hotspotSsid, hotspotPass));
         F<Image>("UrlQrImage").Source = a == null ? null : QrImage("http://" + a.Ip + ":" + Net.WebPort);
